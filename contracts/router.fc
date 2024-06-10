@@ -1,0 +1,174 @@
+#include "stdlib.fc";
+
+#include "errors.fc";
+#include "messages.fc";
+#include "jetton-utils.fc";
+#include "op.fc";
+#include "gas.fc";
+#include "params.fc";
+
+;; storage variables
+global slice admin_address;
+global slice fee_address;
+global int flat_fee;
+global int fee_percent;
+global int fee_percent_threshold;
+global int referral_percent;
+
+;; load_data populates storage variables using stored data
+() load_data() impure {
+    var ds = get_data().begin_parse();
+
+    admin_address = ds~load_msg_addr();
+    fee_address = ds~load_msg_addr();
+    flat_fee = ds~load_coins();
+    fee_percent = ds~load_uint(7); ;; 7 bits = 128 values, enough to represent 0-100 for percents
+    fee_percent_threshold = ds~load_coins();
+    referral_percent = ds~load_uint(7); ;; 7 bits = 128 values, enough to represent 0-100 for percents
+
+    ds.end_parse();
+}
+
+;; save_data stores storage variables as a cell into persistent storage
+() save_data() impure {
+    set_data(
+        begin_cell()
+            .store_slice(admin_address)
+            .store_slice(fee_address)
+            .store_coins(flat_fee)
+            .store_uint(fee_percent, 7)
+            .store_coins(fee_percent_threshold)
+            .store_uint(referral_percent, 7)
+            .end_cell()
+    );
+}
+
+;; recv_internal is the main function of the contract and is called when it receives a message from other contracts
+() recv_internal(int my_balance, int msg_value, cell in_msg_full, slice in_msg_body) impure {
+    if (in_msg_body.slice_empty?()) {
+        ;; ignore all empty messages
+        return ();
+    }
+
+    slice cs = in_msg_full.begin_parse();
+    int flags = cs~load_uint(4);
+    if (flags & 1) {
+        ;; ignore all bounced messages
+        return ();
+    }
+
+    load_data(); ;; here we populate the storage variables
+
+    slice sender_address = cs~load_msg_addr();
+    int op = in_msg_body~load_uint(32); ;; by convention, the first 32 bits of incoming message is the op
+    int query_id = in_msg_body~load_uint(64); ;; also by convention, the next 64 bits contain the "query id", although this is not always the case
+
+    if (op == op::jetton::transfer_notification) {
+        (int jetton_amount, slice from_user) = (in_msg_body~load_coins(), in_msg_body~load_msg_addr());
+        cell ref_cs = in_msg_body~load_ref();
+        slice ref_ds = ref_cs.begin_parse();
+
+        throw_unless(INVALID_AMOUNT, jetton_amount > 0);
+
+        ;; check if the call is valid
+        (slice to_address, int has_refferal) = (ref_ds~load_msg_addr(), ref_ds~load_uint(1));
+        force_chain(WORKCHAIN, to_address, WRONG_WORKCHAIN);
+
+
+        int gas_required = get_gas_fee(20000, WORKCHAIN);
+        throw_unless(INSUFFICIENT_GAS, msg_value > gas_required);
+        int ton_amount = msg_value - gas_required;
+
+        int fee = 1;
+        if (jetton_amount > fee_percent_threshold) {
+            fee = jetton_amount * fee_percent / 100;
+        } else {
+            fee = flat_fee;
+        }
+        throw_unless(INSUFFICIENT_AMOUNT, jetton_amount > fee);
+
+        if (fee > 0) {
+            int referral_cut = fee * referral_percent / 100;
+            int fee_with_referral_cut = fee - referral_cut;
+            if (has_refferal) {
+                slice referral_address = ref_ds~load_msg_addr();
+                force_chain(WORKCHAIN, referral_address, WRONG_WORKCHAIN);
+                int amount = ton_amount / 3;
+                var body1 = create_simple_transfer_body(query_id, 0, fee_with_referral_cut, fee_address);
+                send_simple_message(amount, sender_address, body1.end_cell(), NORMAL);
+                var body2 = create_simple_transfer_body(query_id, 0, referral_cut, referral_address);
+                send_simple_message(amount, sender_address, body2.end_cell(), NORMAL);
+                var body3 = create_simple_transfer_body(query_id, 0, jetton_amount - fee, to_address);
+                send_simple_message(amount, sender_address, body3.end_cell(), NORMAL);
+            } else { ;; split
+                int amount = ton_amount / 2;
+                var body1 = create_simple_transfer_body(query_id, 0, fee, fee_address);
+                send_simple_message(amount, sender_address, body1.end_cell(), NORMAL);
+                var body2 = create_simple_transfer_body(query_id, 0, jetton_amount - fee, to_address);
+                send_simple_message(amount, sender_address, body2.end_cell(), NORMAL);
+            }
+        } else { ;; no split
+            var body = create_simple_transfer_body(query_id, 0, jetton_amount, to_address);
+            send_simple_message(ton_amount, sender_address, body.end_cell(), NORMAL);
+        }
+
+        return ();
+    }
+
+    if (op == op::set_admin_address) {
+        throw_unless(NOT_ADMIN, equal_slice_bits(sender_address, admin_address));
+        admin_address = in_msg_body~load_msg_addr();
+        save_data();
+        return ();
+    }
+
+    if (op == op::set_fee_address) {
+        throw_unless(NOT_ADMIN, equal_slice_bits(sender_address, admin_address));
+        fee_address = in_msg_body~load_msg_addr();
+        save_data();
+        return ();
+    }
+
+    if (op == op::set_fees) {
+        throw_unless(NOT_ADMIN, equal_slice_bits(sender_address, admin_address));
+        flat_fee = in_msg_body~load_coins();
+        fee_percent = in_msg_body~load_uint(7);
+        fee_percent_threshold = in_msg_body~load_coins();
+        referral_percent = in_msg_body~load_uint(7);
+        throw_if(INVALID_PERCENT, fee_percent > 100);
+        throw_if(INVALID_PERCENT, referral_percent > 100);
+        save_data();
+        return ();
+    }
+
+    if (op == op::refund) {
+        throw_unless(NOT_ADMIN, equal_slice_bits(sender_address, admin_address));
+        slice jetton_wallet_address = in_msg_body~load_msg_addr();
+        int jetton_amount = in_msg_body~load_coins();
+        var body = create_simple_transfer_body(query_id, 0, jetton_amount, admin_address);
+        int amount = msg_value;
+        int ton_refund = my_balance - REQUIRED_TON_RESERVE;
+        if (ton_refund > 0) {
+            amount = ton_refund;
+        }
+        send_simple_message(amount, jetton_wallet_address, body.end_cell(), NORMAL);
+        return ();
+    }
+
+    throw(WRONG_OP); ;; if the message contains an op that is not known to this contract, we throw
+}
+
+slice get_admin_address() method_id {
+    load_data();
+    return admin_address;
+}
+
+slice get_fee_address() method_id {
+    load_data();
+    return fee_address;
+}
+
+(int, int, int, int) get_fees() method_id {
+    load_data();
+    return (flat_fee, fee_percent, fee_percent_threshold, referral_percent);
+}

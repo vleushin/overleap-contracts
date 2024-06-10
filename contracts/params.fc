@@ -1,0 +1,12 @@
+const WORKCHAIN = 0;
+const REQUIRED_TON_RESERVE = 10000000;
+
+(int) get_workchain(slice address) inline {
+    (int wc, _) = parse_std_addr(address);
+    return wc;
+}
+
+() force_chain(int workchain, slice address, int error_code) impure inline {
+    (int wc) = get_workchain(address);
+    throw_unless(error_code, wc == workchain);
+}

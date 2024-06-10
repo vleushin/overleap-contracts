@@ -1,0 +1,6 @@
+const op::jetton::transfer_notification = 0x7362d09c;
+
+const op::set_admin_address = "op::set_admin_address"c;
+const op::set_fee_address = "op::set_fee_address"c;
+const op::set_fees = "op::set_fees"c;
+const op::refund = "op::refund"c;
