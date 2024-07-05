@@ -1,4 +1,4 @@
-# Overleap contracts
+# Overleap addresses
 
 * Router contract: [EQBr7Nj2lBZfUyMQOmg4s3WBSHXae0GhFdjDEqv-lW2nqITC](https://tonviewer.com/EQBr7Nj2lBZfUyMQOmg4s3WBSHXae0GhFdjDEqv-lW2nqITC)
 * Admin address: [UQBM6PB3Ha4mpsjm8gVvGc8J6XiftOYgVt3wWZKLk2jYvlT6](https://tonviewer.com/UQBM6PB3Ha4mpsjm8gVvGc8J6XiftOYgVt3wWZKLk2jYvlT6)
